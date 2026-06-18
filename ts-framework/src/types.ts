@@ -106,7 +106,7 @@ export interface BenchmarkResult {
 
 export interface WasmBindgenModule {
   default: () => Promise<void> | void;
-  RasterEngine: new (width: number, height: number) => WasmRasterEngine;
+  RasterEngine: { new(width: number, height: number): WasmRasterEngine };
   memory?: WebAssembly.Memory;
   wasm_memory?: WebAssembly.Memory;
 }

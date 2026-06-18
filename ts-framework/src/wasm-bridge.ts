@@ -1,10 +1,8 @@
 import { WasmBindgenModule, WasmRasterEngine } from './types';
 
-type RasterEngineCtor = new (width: number, height: number) => WasmRasterEngine;
-
 let wasmModule: WasmBindgenModule | null = null;
 let wasmMemory: WebAssembly.Memory | null = null;
-let rasterEngineCtor: RasterEngineCtor | null = null;
+let rasterEngineCtor: any = null;
 
 export async function initWasm(modulePath: string): Promise<WasmBindgenModule> {
   if (wasmModule) return wasmModule;
@@ -41,10 +39,13 @@ export function getWasmMemory(): WebAssembly.Memory {
 export function createEngine(width: number, height: number): WasmRasterEngine {
   if (!rasterEngineCtor) {
     if (wasmModule && wasmModule.RasterEngine) {
-      rasterEngineCtor = wasmModule.RasterEngine as RasterEngineCtor;
+      rasterEngineCtor = wasmModule.RasterEngine;
     } else {
       throw new Error('RasterEngine not available. Call initWasm() first.');
     }
+  }
+  if (typeof (rasterEngineCtor as any).new === 'function') {
+    return (rasterEngineCtor as any).new(width, height);
   }
   return new rasterEngineCtor(width, height);
 }
