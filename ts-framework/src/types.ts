@@ -63,6 +63,12 @@ export interface FontInfo {
   size: number;
 }
 
+export interface RenderContext {
+  renderer: unknown;
+  matrixStack: Mat4[];
+  currentBlend: BlendMode;
+}
+
 export interface SceneNode {
   id: number;
   parent: SceneNode | null;
@@ -72,12 +78,6 @@ export interface SceneNode {
   opacity: number;
   blendMode: BlendMode;
   draw: (ctx: RenderContext) => void;
-}
-
-export interface RenderContext {
-  renderer: RasterRenderer;
-  matrixStack: Mat4[];
-  currentBlend: BlendMode;
 }
 
 export interface CameraConfig {

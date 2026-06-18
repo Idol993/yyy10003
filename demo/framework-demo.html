@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Framework Demo - Raster Engine TS</title>
+<style>
+  body {
+    background: #111;
+    color: #ddd;
+    font-family: system-ui, sans-serif;
+    padding: 24px;
+  }
+  h1 { font-size: 18px; margin-bottom: 8px; color: #88c; }
+  h2 { font-size: 14px; margin-top: 16px; margin-bottom: 6px; color: #88c; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+  .box {
+    background: #1a1a24;
+    border: 1px solid #2a2a3a;
+    border-radius: 8px;
+    padding: 12px;
+  }
+  canvas {
+    border: 1px solid #333;
+    image-rendering: pixelated;
+    background: #000;
+  }
+  button {
+    padding: 6px 14px;
+    margin: 3px;
+    background: #2a2a4a;
+    color: #aad;
+    border: 1px solid #3a3a5a;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  button:hover { background: #3a3a6a; color: #ccc; }
+  .log {
+    background: #05050a;
+    border: 1px solid #223;
+    padding: 10px;
+    font-family: monospace;
+    font-size: 12px;
+    min-height: 80px;
+    max-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  table { border-collapse: collapse; font-size: 12px; font-family: monospace; }
+  th, td { padding: 3px 10px; border-bottom: 1px solid #222; text-align: left; }
+  th { color: #88c; }
+  #loading { color: #88c; font-size: 14px; }
+  .good { color: #4caf50; }
+  .bad { color: #f44336; }
+</style>
+</head>
+<body>
+
+<h1>Framework Demo - TS Framework Path Validation</h1>
+
+<div id="loading">Loading TS Framework + Wasm...</div>
+
+<div class="row" id="content" style="display:none">
+  <div class="box">
+    <h2>Canvas Output</h2>
+    <canvas id="canvas" width="640" height="480"></canvas>
+  </div>
+
+  <div class="box">
+    <h2>Test Actions</h2>
+    <button onclick="testClearAndPrimitives()">1. Clear + Draw Primitives</button>
+    <button onclick="testDrawPolygon()">2. Draw Polygon</button>
+    <button onclick="testLayers()">3. Layers + Blend Modes</button>
+    <button onclick="startAnimation()">4. Start Animation Loop</button>
+    <button onclick="stopAnimation()">Stop Loop</button>
+    <br>
+    <h2>Benchmarks</h2>
+    <button onclick="runFrameworkBenchmark('triangles')">Benchmark Triangles</button>
+    <button onclick="runFrameworkBenchmark('circles')">Benchmark Circles</button>
+    <button onclick="runFrameworkBenchmark('polygons')">Benchmark Polygons</button>
+    <br><br>
+    <table id="bench-table">
+      <thead><tr><th>Type</th><th>Count</th><th>Time(ms)</th><th>Memory(MB)</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="row">
+  <div class="box" style="flex:1;min-width:400px">
+    <h2>Log</h2>
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script type="module">
+import {
+  RasterRenderer,
+  BlendMode,
+  initWasm,
+  getWasmModule,
+  getWasmMemory,
+  writeFloatArrayToWasm,
+  freeWasmBytes,
+} from './ts-out/index.js';
+
+let renderer = null;
+let animFrameId = 0;
+let t0 = 0;
+
+function log(msg, cls) {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+async function main() {
+  try {
+    log('[1/4] Loading wasm-bindgen glue module...');
+    const canvas = document.getElementById('canvas');
+
+    const wasmModulePath = '../raster-engine/pkg/raster_engine.js';
+
+    renderer = new RasterRenderer(canvas);
+    log('[2/4] Initializing RasterRenderer via framework init()...');
+    await renderer.init(wasmModulePath);
+
+    log('[3/4] Validating framework objects...');
+    const engine = renderer.engineRef;
+    if (!engine) throw new Error('engineRef is null');
+    log('  engineRef.get_width() = ' + engine.get_width(), 'good');
+    log('  engineRef.get_height() = ' + engine.get_height(), 'good');
+    log('  engineRef.get_buffer_ptr() = 0x' + engine.get_buffer_ptr().toString(16), 'good');
+    log('  prim accessor OK: ' + (renderer.prim ? 'yes' : 'no'), 'good');
+    log('  layers accessor OK: ' + (renderer.layers ? 'yes' : 'no'), 'good');
+    log('  fonts accessor OK: ' + (renderer.fonts ? 'yes' : 'no'), 'good');
+    log('  cam accessor OK: ' + (renderer.cam ? 'yes' : 'no'), 'good');
+    log('  sceneTree accessor OK: ' + (renderer.sceneTree ? 'yes' : 'no'), 'good');
+    log('  matStack accessor OK: ' + (renderer.matStack ? 'yes' : 'no'), 'good');
+    log('  frameScheduler accessor OK: ' + (renderer.frameScheduler ? 'yes' : 'no'), 'good');
+
+    const mem = getWasmMemory();
+    log('  getWasmMemory() buffer byteLength: ' + (mem.buffer.byteLength / 1024 / 1024).toFixed(2) + ' MB', 'good');
+
+    log('[4/4] First clear + present test...');
+    renderer.clear(0.1, 0.1, 0.15, 1.0);
+    renderer.engineRef.draw_circle(320, 240, 80, 0.3, 0.7, 1.0, 1.0, true);
+    renderer.present();
+    log('  First present() succeeded (you should see a blue circle on the canvas)', 'good');
+
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('content').style.display = 'flex';
+    log('=== Framework initialization complete ===', 'good');
+  } catch (e) {
+    log('ERROR: ' + e.toString(), 'bad');
+    log(e.stack || '', 'bad');
+    document.getElementById('loading').textContent = 'Failed - see log';
+  }
+}
+
+window.testClearAndPrimitives = function() {
+  if (!renderer) return;
+  log('testClearAndPrimitives()');
+  renderer.clear(0.05, 0.05, 0.08, 1.0);
+  const e = renderer.engineRef;
+
+  e.draw_rect(50, 50, 200, 100, 0.9, 0.3, 0.3, 0.9);
+  e.draw_circle(400, 150, 60, 0.3, 0.9, 0.3, 0.9, true);
+  e.draw_line(50, 350, 590, 430, 0.9, 0.9, 0.3, 1.0, 3);
+  e.draw_rect_stroke(430, 280, 180, 120, 0.3, 0.9, 0.9, 1.0, 2);
+
+  renderer.present();
+  log('  Drew rect / circle / line / rectStroke via engineRef.', 'good');
+};
+
+window.testDrawPolygon = function() {
+  if (!renderer) return;
+  log('testDrawPolygon() - star shape via framework writeFloatArrayToWasm');
+  renderer.clear(0.05, 0.05, 0.08, 1.0);
+
+  const cx = 320, cy = 240, outer = 120, inner = 50;
+  const pts = [];
+  for (let i = 0; i < 10; i++) {
+    const a = (i / 10) * Math.PI * 2 - Math.PI / 2;
+    const r = i % 2 === 0 ? outer : inner;
+    pts.push(cx + Math.cos(a) * r);
+    pts.push(cy + Math.sin(a) * r);
+  }
+  const f32 = new Float32Array(pts);
+  log('  Allocating Wasm memory for ' + f32.length + ' floats (' + (f32.byteLength) + ' bytes)');
+  const { ptr, len } = writeFloatArrayToWasm(renderer.engineRef, f32);
+  log('  Wasm ptr=0x' + ptr.toString(16) + ', len=' + len);
+  try {
+    renderer.engineRef.draw_polygon(ptr, len, 1.0, 0.6, 0.2, 0.9, true);
+    log('  draw_polygon() returned OK', 'good');
+  } finally {
+    freeWasmBytes(renderer.engineRef, ptr, f32.byteLength);
+    log('  Wasm memory freed');
+  }
+
+  renderer.present();
+  log('  Star polygon drawn and presented.', 'good');
+};
+
+window.testLayers = function() {
+  if (!renderer) return;
+  log('testLayers() - 3 layers with different blend modes');
+  const e = renderer.engineRef;
+
+  e.set_blend_mode(0);
+  e.clear(0.05, 0.05, 0.08, 1.0);
+
+  const l1 = e.create_layer();
+  const l2 = e.create_layer();
+  const l3 = e.create_layer();
+  log('  Created layers: ' + l1 + ', ' + l2 + ', ' + l3);
+
+  e.set_layer_blend_mode(l1, 0);
+  e.set_layer_blend_mode(l2, 1);
+  e.set_layer_blend_mode(l3, 2);
+  e.set_layer_opacity(l1, 0.9);
+  e.set_layer_opacity(l2, 0.7);
+  e.set_layer_opacity(l3, 0.7);
+
+  e.set_active_layer(l1);
+  e.clear_layer(l1, 0, 0, 0, 0);
+  e.draw_circle(220, 200, 100, 1.0, 0.3, 0.3, 1.0, true);
+
+  e.set_active_layer(l2);
+  e.clear_layer(l2, 0, 0, 0, 0);
+  e.draw_circle(320, 260, 100, 0.3, 1.0, 0.3, 1.0, true);
+
+  e.set_active_layer(l3);
+  e.clear_layer(l3, 0, 0, 0, 0);
+  e.draw_circle(420, 200, 100, 0.3, 0.3, 1.0, 1.0, true);
+
+  e.set_active_layer(0);
+  e.composite_layer_to_main(l1);
+  e.composite_layer_to_main(l2);
+  e.composite_layer_to_main(l3);
+
+  e.free_layer(l1);
+  e.free_layer(l2);
+  e.free_layer(l3);
+
+  renderer.present();
+  log('  3 layers composited (AlphaBlend / Add / Multiply).', 'good');
+};
+
+window.startAnimation = function() {
+  if (!renderer) return;
+  log('startAnimation() - using renderer.startLoop()');
+  t0 = performance.now();
+  renderer.startLoop(
+    (dt) => {},
+    (r) => {
+      const t = (performance.now() - t0) / 1000;
+      const e = r.engineRef;
+      r.clear(0.04, 0.04, 0.07, 1.0);
+
+      for (let i = 0; i < 12; i++) {
+        const a = t + i * Math.PI / 6;
+        const x = 320 + Math.cos(a) * 140;
+        const y = 240 + Math.sin(a) * 100;
+        e.draw_circle(x, y, 22,
+          Math.abs(Math.sin(t + i * 0.5)),
+          Math.abs(Math.cos(t + i * 0.3)),
+          Math.abs(Math.sin(t * 0.7 + i * 0.4)),
+          0.85, true);
+      }
+    }
+  );
+  log('  Loop running. 12 animated circles should appear on canvas.', 'good');
+};
+
+window.stopAnimation = function() {
+  if (!renderer) return;
+  renderer.stopLoop();
+  log('stopAnimation() - loop stopped.', 'good');
+};
+
+window.runFrameworkBenchmark = function(type) {
+  if (!renderer) return;
+  log('runFrameworkBenchmark("' + type + '") via renderer.runBenchmark()');
+  const counts = [10, 50, 100, 200, 500, 1000];
+  const results = renderer.runBenchmark(type, counts);
+  const tbody = document.querySelector('#bench-table tbody');
+  results.forEach((r) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td>' + r.primitiveType + '</td><td>' + r.primitiveCount + '</td>' +
+      '<td>' + r.frameTime.toFixed(2) + '</td>' +
+      '<td>' + (r.memoryUsage / 1024 / 1024).toFixed(2) + '</td>';
+    tbody.appendChild(tr);
+  });
+  log('  ' + results.length + ' rows added to table.', 'good');
+};
+
+main();
+</script>
+
+</body>
+</html>

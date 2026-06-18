@@ -1,6 +1,6 @@
 import {
   WasmBindgenModule, WasmRasterEngine, BlendMode, FrameStats,
-  BenchmarkResult, TriangleVertex, Color, RenderContext
+  BenchmarkResult, RenderContext
 } from './types';
 import { initWasm, createEngine, createImageData, writeBytesToWasm, freeWasmBytes, getWasmMemory } from './wasm-bridge';
 import { MatrixStack } from './matrix';

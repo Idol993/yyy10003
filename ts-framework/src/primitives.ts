@@ -1,4 +1,4 @@
-import { WasmRasterEngine, BlendMode, TriangleVertex, RenderContext } from './types';
+import { WasmRasterEngine, TriangleVertex } from './types';
 import { MatrixStack } from './matrix';
 import { writeFloatArrayToWasm, freeWasmBytes } from './wasm-bridge';
 
