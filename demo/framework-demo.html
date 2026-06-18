@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>Framework Demo - Raster Engine</title>
+<title>Framework Demo - ts-framework Entry Point</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { background: #111; color: #ddd; font-family: system-ui, sans-serif; padding: 20px; }
@@ -13,7 +13,7 @@ h2 { font-size: 14px; margin: 12px 0 6px; color: #88c; }
 canvas { border: 1px solid #333; image-rendering: pixelated; background: #000; display: block; }
 button { padding: 6px 14px; margin: 3px; background: #2a2a4a; color: #aad; border: 1px solid #3a3a5a; border-radius: 4px; cursor: pointer; font-size: 12px; }
 button:hover { background: #3a3a6a; color: #ccf; }
-.log { background: #05050a; border: 1px solid #223; padding: 10px; font-family: monospace; font-size: 12px; min-height: 60px; max-height: 260px; overflow-y: auto; white-space: pre-wrap; line-height: 1.5; }
+.log { background: #05050a; border: 1px solid #223; padding: 10px; font-family: monospace; font-size: 12px; min-height: 60px; max-height: 280px; overflow-y: auto; white-space: pre-wrap; line-height: 1.5; }
 table { border-collapse: collapse; font-size: 12px; font-family: monospace; margin-top: 8px; }
 th, td { padding: 3px 10px; border-bottom: 1px solid #222; text-align: left; }
 th { color: #88c; }
@@ -26,11 +26,11 @@ th { color: #88c; }
 </head>
 <body>
 
-<h1>Framework Demo — ts-framework Entry Point</h1>
+<h1>Framework Demo — Real ts-framework Entry Point</h1>
 
 <div id="loading">
   <div class="spinner"></div>
-  Loading Wasm via framework entry...
+  Loading RasterRenderer via ts-framework entry...
 </div>
 
 <div id="content" style="display:none">
@@ -40,13 +40,13 @@ th { color: #88c; }
       <canvas id="canvas" width="640" height="480"></canvas>
     </div>
     <div class="box">
-      <h2>Test Actions</h2>
+      <h2>Test Actions (via RasterRenderer)</h2>
       <button onclick="testClearAndPrimitives()">1. Clear + Draw Primitives</button>
       <button onclick="testDrawPolygon()">2. Draw Polygon</button>
       <button onclick="testLayers()">3. Layers + Blend Modes</button>
       <button onclick="startAnimation()">4. Start Animation</button>
       <button onclick="stopAnimation()">Stop</button>
-      <h2>Benchmarks</h2>
+      <h2>Benchmarks (via renderer.runBenchmark)</h2>
       <button onclick="runBenchmark('triangles')">Triangles</button>
       <button onclick="runBenchmark('circles')">Circles</button>
       <button onclick="runBenchmark('polygons')">Polygons</button>
@@ -62,331 +62,293 @@ th { color: #88c; }
   </div>
 </div>
 
-<script>
-(function() {
-  "use strict";
+<script type="module">
+import {
+  RasterRenderer,
+  BlendMode,
+  initWasm,
+  getWasmModule,
+  getWasmMemory,
+  writeFloatArrayToWasm,
+  freeWasmBytes,
+} from './ts-out/index.js';
 
-  var wasmModule = null;
-  var wasmMemory = null;
-  var engine = null;
-  var canvas = document.getElementById('canvas');
-  var ctx = canvas.getContext('2d');
-  var W = canvas.width;
-  var H = canvas.height;
-  var animId = 0;
-  var animT0 = 0;
+let renderer = null;
+let animId = 0;
+let animT0 = 0;
+const W = 640, H = 480;
 
-  function log(msg, cls) {
-    var el = document.getElementById('log');
-    var d = document.createElement('div');
-    if (cls) d.className = cls;
-    d.textContent = new Date().toLocaleTimeString() + '  ' + msg;
-    el.appendChild(d);
-    el.scrollTop = el.scrollHeight;
+function log(msg, cls) {
+  const el = document.getElementById('log');
+  const d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.textContent = new Date().toLocaleTimeString() + '  ' + msg;
+  el.appendChild(d);
+  el.scrollTop = el.scrollHeight;
+}
+
+function hsl(h, s, l) {
+  let r, g, b;
+  if (s === 0) { r = g = b = l; } else {
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    r = hue(p, q, h + 1/3);
+    g = hue(p, q, h);
+    b = hue(p, q, h - 1/3);
   }
+  return [r, g, b];
+}
+function hue(p, q, t) {
+  if (t < 0) t += 1; if (t > 1) t -= 1;
+  if (t < 1/6) return p + (q - p) * 6 * t;
+  if (t < 1/2) return q;
+  if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+  return p;
+}
 
-  function writeFloat32(data) {
-    var byteLen = data.length * 4;
-    var ptr = engine.malloc(byteLen);
-    var view = new Uint8Array(wasmMemory.buffer);
-    view.set(new Uint8Array(data.buffer, data.byteOffset, byteLen), ptr);
-    return { ptr: ptr, len: data.length, byteLen: byteLen };
-  }
+async function main() {
+  try {
+    log('[1/6] Imported RasterRenderer from ./ts-out/index.js');
+    log('  RasterRenderer is constructor: ' + (typeof RasterRenderer === 'function' ? 'yes' : 'no'));
+    log('  BlendMode.AlphaBlend = ' + BlendMode.AlphaBlend);
 
-  function freeAlloc(ptr, byteLen) {
-    engine.free(ptr, byteLen);
-  }
+    const canvas = document.getElementById('canvas');
+    log('[2/6] Creating RasterRenderer instance...');
+    renderer = new RasterRenderer(canvas);
+    log('  renderer.constructor.name = ' + renderer.constructor.name, 'good');
 
-  function present() {
-    if (!wasmMemory || !wasmMemory.buffer) return;
-    var ptr = engine.get_buffer_ptr();
-    var len = engine.get_buffer_len();
-    var w = engine.get_width();
-    var h = engine.get_height();
-    if (ptr === 0 || len === 0) return;
-    var view = new Uint8ClampedArray(wasmMemory.buffer, ptr, len);
-    var imgData = new ImageData(view, w, h);
-    if (w !== W || h !== H) {
-      var tmp = document.createElement('canvas');
-      tmp.width = w; tmp.height = h;
-      var tc = tmp.getContext('2d');
-      tc.putImageData(imgData, 0, 0);
-      ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(tmp, 0, 0, W, H);
-    } else {
-      ctx.putImageData(imgData, 0, 0);
-    }
-  }
+    log('[3/6] Calling renderer.init(wasmModulePath)...');
+    const wasmPath = '../raster-engine/pkg/raster_engine.js';
+    await renderer.init(wasmPath);
+    log('  init() resolved successfully', 'good');
 
-  function hsl(h, s, l) {
-    var r, g, b;
-    if (s === 0) { r = g = b = l; } else {
-      var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-      var p = 2 * l - q;
-      r = hue(p, q, h + 1/3);
-      g = hue(p, q, h);
-      b = hue(p, q, h - 1/3);
-    }
-    return [r, g, b];
-  }
-  function hue(p, q, t) {
-    if (t < 0) t += 1; if (t > 1) t -= 1;
-    if (t < 1/6) return p + (q - p) * 6 * t;
-    if (t < 1/2) return q;
-    if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
-    return p;
-  }
-
-  async function main() {
-    try {
-      log('[1/5] Loading wasm-bindgen glue: ../raster-engine/pkg/raster_engine.js');
-      var mod = await import('../raster-engine/pkg/raster_engine.js');
-
-      log('[2/5] Initializing Wasm module...');
-      if (typeof mod.default === 'function') {
-        await mod.default();
-      }
-      wasmModule = mod;
-      wasmMemory = mod.memory || mod.wasm_memory || null;
-      if (!wasmMemory) {
-        wasmMemory = new WebAssembly.Memory({ initial: 256 });
-      }
-
-      log('[3/5] Creating RasterEngine via module.RasterEngine.new(' + W + ', ' + H + ')');
-      engine = mod.RasterEngine.new(W, H);
-
-      if (mod.memory) wasmMemory = mod.memory;
-
-      log('[4/5] Validating engine instance...');
-      log('  get_width()  = ' + engine.get_width(), 'good');
-      log('  get_height() = ' + engine.get_height(), 'good');
-      log('  get_buffer_ptr() = 0x' + engine.get_buffer_ptr().toString(16), 'good');
-      log('  get_buffer_len() = ' + engine.get_buffer_len(), 'good');
-      log('  wasmMemory.buffer.byteLength = ' + (wasmMemory.buffer.byteLength / 1024 / 1024).toFixed(2) + ' MB', 'good');
-      log('  engine.malloc / free available: ' + (typeof engine.malloc === 'function' ? 'yes' : 'no'), 'good');
-      log('  engine.draw_polygon available: ' + (typeof engine.draw_polygon === 'function' ? 'yes' : 'no'), 'good');
-      log('  engine.benchmark_polygons available: ' + (typeof engine.benchmark_polygons === 'function' ? 'yes' : 'no'), 'good');
-
-      log('[5/5] Drawing initial circle + present...');
-      engine.clear(0.06, 0.06, 0.1, 1.0);
-      engine.draw_circle(W / 2, H / 2, 80, 0.3, 0.7, 1.0, 1.0, true);
-      present();
-      log('  Initial circle rendered successfully!', 'good');
-
-      document.getElementById('loading').style.display = 'none';
-      document.getElementById('content').style.display = 'block';
-      log('=== Framework initialization complete ===', 'good');
-    } catch (e) {
-      log('FATAL: ' + e.toString(), 'bad');
-      if (e.stack) log(e.stack, 'bad');
-      document.getElementById('loading').innerHTML =
-        '<span style="color:#f44">Failed to initialize. See log below.</span>';
-      document.getElementById('content').style.display = 'block';
-    }
-  }
-
-  window.testClearAndPrimitives = function() {
-    if (!engine) { log('Engine not ready', 'bad'); return; }
-    log('testClearAndPrimitives()');
-    engine.clear(0.04, 0.04, 0.07, 1.0);
-
-    engine.draw_rect(40, 40, 180, 100, 0.9, 0.3, 0.3, 0.9);
-    log('  draw_rect done');
-
-    engine.draw_circle(400, 130, 60, 0.3, 0.9, 0.3, 0.9, true);
-    log('  draw_circle (MSAA) done');
-
-    engine.draw_line(40, 300, 600, 380, 0.9, 0.9, 0.3, 1.0, 3);
-    log('  draw_line done');
-
-    engine.draw_rect_stroke(440, 250, 170, 110, 0.3, 0.9, 0.9, 1.0, 2);
-    log('  draw_rect_stroke done');
-
-    engine.draw_circle(320, 400, 35, 1.0, 0.5, 0.2, 0.8, false);
-    log('  draw_circle (no MSAA) done');
-
-    present();
-    log('  All primitives presented.', 'good');
-  };
-
-  window.testDrawPolygon = function() {
-    if (!engine) { log('Engine not ready', 'bad'); return; }
-    log('testDrawPolygon()');
-    engine.clear(0.04, 0.04, 0.07, 1.0);
-
-    var pts = [];
-    var cx = 200, cy = 240, outer = 100, inner = 40, sides = 5;
-    for (var i = 0; i < sides * 2; i++) {
-      var a = (i / (sides * 2)) * Math.PI * 2 - Math.PI / 2;
-      var r = i % 2 === 0 ? outer : inner;
-      pts.push(cx + Math.cos(a) * r);
-      pts.push(cy + Math.sin(a) * r);
-    }
-    log('  Star: ' + (sides * 2) + ' vertices, writing to Wasm memory...');
-    var alloc = writeFloat32(new Float32Array(pts));
-    log('  Allocated ptr=0x' + alloc.ptr.toString(16) + ', ' + alloc.len + ' floats');
-    try {
-      engine.draw_polygon(alloc.ptr, alloc.len, 1.0, 0.6, 0.2, 0.9, true);
-      log('  draw_polygon (star, MSAA) done');
-    } finally {
-      freeAlloc(alloc.ptr, alloc.byteLen);
+    log('[4/6] Validating renderer accessors...');
+    const checks = [
+      ['engineRef', renderer.engineRef],
+      ['prim (Primitives)', renderer.prim],
+      ['layers (LayerManager)', renderer.layers],
+      ['fonts (FontLoader)', renderer.fonts],
+      ['cam (Camera2D)', renderer.cam],
+      ['sceneTree (SceneTree)', renderer.sceneTree],
+      ['matStack (MatrixStack)', renderer.matStack],
+      ['frameScheduler', renderer.frameScheduler],
+    ];
+    for (const [name, obj] of checks) {
+      log('  ' + name + ': ' + (obj ? 'OK' : 'null'), obj ? 'good' : 'bad');
     }
 
-    var hexPts = [];
-    var cx2 = 460, cy2 = 240, rad = 80;
-    for (var j = 0; j < 6; j++) {
-      var a2 = (j / 6) * Math.PI * 2;
-      hexPts.push(cx2 + Math.cos(a2) * rad);
-      hexPts.push(cy2 + Math.sin(a2) * rad);
-    }
-    var alloc2 = writeFloat32(new Float32Array(hexPts));
-    try {
-      engine.draw_polygon(alloc2.ptr, alloc2.len, 0.2, 0.8, 1.0, 0.85, true);
-      log('  draw_polygon (hexagon, MSAA) done');
-    } finally {
-      freeAlloc(alloc2.ptr, alloc2.byteLen);
-    }
+    log('[5/6] Testing wasm bridge access...');
+    const wasmModule = getWasmModule();
+    const wasmMemory = getWasmMemory();
+    const engine = renderer.engineRef;
+    log('  getWasmModule() available: ' + (wasmModule ? 'yes' : 'no'), wasmModule ? 'good' : 'bad');
+    log('  getWasmMemory().byteLength = ' + (wasmMemory.buffer.byteLength / 1024 / 1024).toFixed(2) + ' MB', 'good');
+    log('  engine.get_width() = ' + engine.get_width(), 'good');
+    log('  engine.get_height() = ' + engine.get_height(), 'good');
+    log('  engine.get_buffer_ptr() = 0x' + engine.get_buffer_ptr().toString(16), 'good');
+    log('  engine.get_buffer_len() = ' + engine.get_buffer_len(), 'good');
+    log('  engine.malloc available: ' + (typeof engine.malloc === 'function' ? 'yes' : 'no'), 'good');
+    log('  engine.free available: ' + (typeof engine.free === 'function' ? 'yes' : 'no'), 'good');
+    log('  engine.draw_polygon available: ' + (typeof engine.draw_polygon === 'function' ? 'yes' : 'no'), 'good');
+    log('  engine.benchmark_polygons available: ' + (typeof engine.benchmark_polygons === 'function' ? 'yes' : 'no'), 'good');
 
-    present();
-    log('  Two polygons presented.', 'good');
-  };
+    log('[6/6] Drawing initial circle via renderer engine + present...');
+    renderer.clear(0.06, 0.06, 0.1, 1.0);
+    renderer.engineRef.draw_circle(W / 2, H / 2, 80, 0.3, 0.7, 1.0, 1.0, true);
+    renderer.present();
+    log('  Initial circle rendered successfully!', 'good');
 
-  window.testLayers = function() {
-    if (!engine) { log('Engine not ready', 'bad'); return; }
-    log('testLayers()');
-    engine.set_blend_mode(0);
-    engine.clear(0.04, 0.04, 0.07, 1.0);
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('content').style.display = 'block';
+    log('=== Framework initialization complete via ts-framework entry ===', 'good');
+  } catch (e) {
+    log('FATAL: ' + e.toString(), 'bad');
+    if (e.stack) log(e.stack, 'bad');
+    document.getElementById('loading').innerHTML =
+      '<span style="color:#f44">Failed to initialize. See log below.</span>';
+    document.getElementById('content').style.display = 'block';
+  }
+}
 
-    var l1 = engine.create_layer();
-    var l2 = engine.create_layer();
-    var l3 = engine.create_layer();
-    log('  Created layers: ' + l1 + ', ' + l2 + ', ' + l3);
+window.testClearAndPrimitives = function() {
+  if (!renderer) { log('Renderer not ready', 'bad'); return; }
+  log('testClearAndPrimitives() via RasterRenderer');
+  renderer.clear(0.04, 0.04, 0.07, 1.0);
 
-    engine.set_layer_blend_mode(l1, 0);
-    engine.set_layer_blend_mode(l2, 1);
-    engine.set_layer_blend_mode(l3, 2);
-    engine.set_layer_opacity(l1, 0.9);
-    engine.set_layer_opacity(l2, 0.7);
-    engine.set_layer_opacity(l3, 0.7);
+  const e = renderer.engineRef;
+  e.draw_rect(40, 40, 180, 100, 0.9, 0.3, 0.3, 0.9);
+  e.draw_circle(400, 130, 60, 0.3, 0.9, 0.3, 0.9, true);
+  e.draw_line(40, 300, 600, 380, 0.9, 0.9, 0.3, 1.0, 3);
+  e.draw_rect_stroke(440, 250, 170, 110, 0.3, 0.9, 0.9, 1.0, 2);
+  e.draw_circle(320, 400, 35, 1.0, 0.5, 0.2, 0.8, false);
 
-    engine.set_active_layer(l1);
-    engine.clear_layer(l1, 0, 0, 0, 0);
-    engine.draw_circle(240, 200, 100, 1.0, 0.3, 0.3, 1.0, true);
+  renderer.present();
+  log('  All primitives drawn via engineRef and presented via renderer.present()', 'good');
+};
 
-    engine.set_active_layer(l2);
-    engine.clear_layer(l2, 0, 0, 0, 0);
-    engine.draw_circle(320, 260, 100, 0.3, 1.0, 0.3, 1.0, true);
+window.testDrawPolygon = function() {
+  if (!renderer) { log('Renderer not ready', 'bad'); return; }
+  log('testDrawPolygon() via RasterRenderer + writeFloatArrayToWasm');
+  renderer.clear(0.04, 0.04, 0.07, 1.0);
 
-    engine.set_active_layer(l3);
-    engine.clear_layer(l3, 0, 0, 0, 0);
-    engine.draw_circle(400, 200, 100, 0.3, 0.3, 1.0, 1.0, true);
+  const e = renderer.engineRef;
+  const pts = [];
+  const cx = 200, cy = 240, outer = 100, inner = 40, sides = 5;
+  for (let i = 0; i < sides * 2; i++) {
+    const a = (i / (sides * 2)) * Math.PI * 2 - Math.PI / 2;
+    const r = i % 2 === 0 ? outer : inner;
+    pts.push(cx + Math.cos(a) * r);
+    pts.push(cy + Math.sin(a) * r);
+  }
+  log('  Star: ' + (sides * 2) + ' vertices, writing via writeFloatArrayToWasm...');
+  const alloc = writeFloatArrayToWasm(e, new Float32Array(pts));
+  log('  Allocated ptr=0x' + alloc.ptr.toString(16) + ', ' + alloc.len + ' floats');
+  try {
+    e.draw_polygon(alloc.ptr, alloc.len, 1.0, 0.6, 0.2, 0.9, true);
+    log('  draw_polygon (star, MSAA) done');
+  } finally {
+    freeWasmBytes(e, alloc.ptr, (new Float32Array(pts)).byteLength);
+    log('  Wasm memory freed via freeWasmBytes');
+  }
 
-    engine.set_active_layer(0);
-    engine.composite_layer_to_main(l1);
-    engine.composite_layer_to_main(l2);
-    engine.composite_layer_to_main(l3);
-    log('  Composited 3 layers (AlphaBlend / Add / Multiply)');
+  const hexPts = [];
+  const cx2 = 460, cy2 = 240, rad = 80;
+  for (let j = 0; j < 6; j++) {
+    const a2 = (j / 6) * Math.PI * 2;
+    hexPts.push(cx2 + Math.cos(a2) * rad);
+    hexPts.push(cy2 + Math.sin(a2) * rad);
+  }
+  const alloc2 = writeFloatArrayToWasm(e, new Float32Array(hexPts));
+  try {
+    e.draw_polygon(alloc2.ptr, alloc2.len, 0.2, 0.8, 1.0, 0.85, true);
+    log('  draw_polygon (hexagon, MSAA) done');
+  } finally {
+    freeWasmBytes(e, alloc2.ptr, (new Float32Array(hexPts)).byteLength);
+  }
 
-    engine.free_layer(l1);
-    engine.free_layer(l2);
-    engine.free_layer(l3);
-    log('  Freed all layers');
+  renderer.present();
+  log('  Two polygons presented via renderer.present()', 'good');
+};
 
-    present();
-    log('  Layer demo presented.', 'good');
-  };
+window.testLayers = function() {
+  if (!renderer) { log('Renderer not ready', 'bad'); return; }
+  log('testLayers() via RasterRenderer.layers');
+  const e = renderer.engineRef;
+  e.set_blend_mode(0);
+  renderer.clear(0.04, 0.04, 0.07, 1.0);
 
-  window.startAnimation = function() {
-    if (!engine) { log('Engine not ready', 'bad'); return; }
-    if (animId) { log('Already running'); return; }
-    log('startAnimation()');
-    animT0 = performance.now();
-    var last = animT0;
+  const l1 = e.create_layer();
+  const l2 = e.create_layer();
+  const l3 = e.create_layer();
+  log('  Created layers: ' + l1 + ', ' + l2 + ', ' + l3);
 
-    function tick(ts) {
-      var dt = ts - last;
-      last = ts;
-      var t = (ts - animT0) / 1000;
+  e.set_layer_blend_mode(l1, 0);
+  e.set_layer_blend_mode(l2, 1);
+  e.set_layer_blend_mode(l3, 2);
+  e.set_layer_opacity(l1, 0.9);
+  e.set_layer_opacity(l2, 0.7);
+  e.set_layer_opacity(l3, 0.7);
 
-      engine.clear(0.04, 0.04, 0.07, 1.0);
+  e.set_active_layer(l1);
+  e.clear_layer(l1, 0, 0, 0, 0);
+  e.draw_circle(240, 200, 100, 1.0, 0.3, 0.3, 1.0, true);
 
-      for (var i = 0; i < 12; i++) {
-        var a = t + i * Math.PI / 6;
-        var x = W / 2 + Math.cos(a) * 140;
-        var y = H / 2 + Math.sin(a) * 100;
-        var c = hsl(i / 12, 0.85, 0.6);
-        engine.draw_circle(x, y, 22, c[0], c[1], c[2], 0.85, true);
+  e.set_active_layer(l2);
+  e.clear_layer(l2, 0, 0, 0, 0);
+  e.draw_circle(320, 260, 100, 0.3, 1.0, 0.3, 1.0, true);
+
+  e.set_active_layer(l3);
+  e.clear_layer(l3, 0, 0, 0, 0);
+  e.draw_circle(400, 200, 100, 0.3, 0.3, 1.0, 1.0, true);
+
+  e.set_active_layer(0);
+  e.composite_layer_to_main(l1);
+  e.composite_layer_to_main(l2);
+  e.composite_layer_to_main(l3);
+  log('  Composited 3 layers (AlphaBlend / Add / Multiply)');
+
+  e.free_layer(l1);
+  e.free_layer(l2);
+  e.free_layer(l3);
+  log('  Freed all layers');
+
+  renderer.present();
+  log('  Layer demo presented via renderer.present()', 'good');
+};
+
+window.startAnimation = function() {
+  if (!renderer) { log('Renderer not ready', 'bad'); return; }
+  if (renderer.frameScheduler.isRunning) { log('Already running'); return; }
+  log('startAnimation() via renderer.startLoop()');
+  animT0 = performance.now();
+
+  renderer.startLoop(
+    (dt) => {},
+    (r) => {
+      const t = (performance.now() - animT0) / 1000;
+      const e = r.engineRef;
+
+      r.clear(0.04, 0.04, 0.07, 1.0);
+
+      for (let i = 0; i < 12; i++) {
+        const a = t + i * Math.PI / 6;
+        const x = W / 2 + Math.cos(a) * 140;
+        const y = H / 2 + Math.sin(a) * 100;
+        const c = hsl(i / 12, 0.85, 0.6);
+        e.draw_circle(x, y, 22, c[0], c[1], c[2], 0.85, true);
       }
 
-      var starPts = [];
-      var cx = W / 2, cy = H / 2, outr = 35, inr = 14;
-      for (var j = 0; j < 10; j++) {
-        var sa = (j / 10) * Math.PI * 2 - Math.PI / 2 + t * 0.5;
-        var sr = j % 2 === 0 ? outr : inr;
+      const starPts = [];
+      const cx = W / 2, cy = H / 2, outr = 35, inr = 14;
+      for (let j = 0; j < 10; j++) {
+        const sa = (j / 10) * Math.PI * 2 - Math.PI / 2 + t * 0.5;
+        const sr = j % 2 === 0 ? outr : inr;
         starPts.push(cx + Math.cos(sa) * sr);
         starPts.push(cy + Math.sin(sa) * sr);
       }
-      var al = writeFloat32(new Float32Array(starPts));
+      const al = writeFloatArrayToWasm(e, new Float32Array(starPts));
       try {
-        engine.draw_polygon(al.ptr, al.len, 1.0, 0.9, 0.3, 0.95, true);
+        e.draw_polygon(al.ptr, al.len, 1.0, 0.9, 0.3, 0.95, true);
       } finally {
-        freeAlloc(al.ptr, al.byteLen);
+        freeWasmBytes(e, al.ptr, (new Float32Array(starPts)).byteLength);
       }
-
-      present();
-      animId = requestAnimationFrame(tick);
     }
-    animId = requestAnimationFrame(tick);
-    log('  Animation loop started.', 'good');
-  };
+  );
+  log('  Animation loop started via renderer.startLoop()', 'good');
+};
 
-  window.stopAnimation = function() {
-    if (animId) {
-      cancelAnimationFrame(animId);
-      animId = 0;
-      log('Animation stopped.', 'good');
-    }
-  };
+window.stopAnimation = function() {
+  if (renderer && renderer.frameScheduler.isRunning) {
+    renderer.stopLoop();
+    log('Animation stopped via renderer.stopLoop()', 'good');
+  }
+};
 
-  window.runBenchmark = function(type) {
-    if (!engine) { log('Engine not ready', 'bad'); return; }
-    if (animId) { stopAnimation(); }
-    log('runBenchmark("' + type + '")');
-    var counts = [10, 50, 100, 200, 500, 1000];
-    var tbody = document.querySelector('#bench-table tbody');
+window.runBenchmark = function(type) {
+  if (!renderer) { log('Renderer not ready', 'bad'); return; }
+  if (renderer.frameScheduler.isRunning) stopAnimation();
+  log('runBenchmark("' + type + '") via renderer.runBenchmark()');
+  const counts = [10, 50, 100, 200, 500, 1000];
 
-    engine.set_blend_mode(0);
-    engine.set_active_layer(0);
+  const results = renderer.runBenchmark(type, counts);
+  const tbody = document.querySelector('#bench-table tbody');
 
-    for (var ci = 0; ci < counts.length; ci++) {
-      var count = counts[ci];
-      engine.clear(0, 0, 0, 1);
-      var time = 0;
+  for (const r of results) {
+    const row = document.createElement('tr');
+    row.innerHTML =
+      '<td>' + r.primitiveType + '</td>' +
+      '<td>' + r.primitiveCount + '</td>' +
+      '<td>' + r.frameTime.toFixed(2) + '</td>' +
+      '<td>' + (r.memoryUsage / 1024 / 1024).toFixed(2) + '</td>';
+    tbody.appendChild(row);
+  }
 
-      if (type === 'triangles') {
-        time = engine.benchmark_triangles(count, 30);
-      } else if (type === 'circles') {
-        time = engine.benchmark_circles(count, 20);
-      } else if (type === 'polygons') {
-        time = engine.benchmark_polygons(count, 6, 25);
-      }
+  renderer.clear(0.06, 0.06, 0.1, 1.0);
+  renderer.present();
+  log('  Benchmark "' + type + '" complete, ' + results.length + ' rows added to table.', 'good');
+};
 
-      var mem = wasmMemory && wasmMemory.buffer
-        ? (wasmMemory.buffer.byteLength / 1024 / 1024).toFixed(2)
-        : '0';
-
-      var row = document.createElement('tr');
-      row.innerHTML = '<td>' + type + '</td><td>' + count + '</td><td>' + time.toFixed(2) + '</td><td>' + mem + '</td>';
-      tbody.appendChild(row);
-    }
-
-    engine.clear(0.06, 0.06, 0.1, 1.0);
-    present();
-    log('  Benchmark "' + type + '" done, ' + counts.length + ' rows added.', 'good');
-  };
-
-  main();
-})();
+main();
 </script>
 
 </body>
