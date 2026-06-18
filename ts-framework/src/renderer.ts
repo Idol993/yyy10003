@@ -1,8 +1,8 @@
 import {
-  WasmExports, WasmRasterEngine, BlendMode, FrameStats,
+  WasmBindgenModule, WasmRasterEngine, BlendMode, FrameStats,
   BenchmarkResult, TriangleVertex, Color, RenderContext
 } from './types';
-import { initWasm, getWasm, createImageData, writeBytesToWasm, freeWasmBytes } from './wasm-bridge';
+import { initWasm, createEngine, createImageData, writeBytesToWasm, freeWasmBytes, getWasmMemory } from './wasm-bridge';
 import { MatrixStack } from './matrix';
 import { Camera2D } from './camera';
 import { SceneTree } from './scene';
@@ -12,7 +12,7 @@ import { FontLoader } from './font-loader';
 import { FrameScheduler } from './scheduler';
 
 export class RasterRenderer {
-  private wasm!: WasmExports;
+  private wasmModule!: WasmBindgenModule;
   private engine!: WasmRasterEngine;
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -53,9 +53,9 @@ export class RasterRenderer {
     this.scheduler = new FrameScheduler();
   }
 
-  async init(wasmPath: string): Promise<void> {
-    this.wasm = await initWasm(wasmPath);
-    this.engine = new this.wasm.RasterEngine(this.currentWidth, this.currentHeight);
+  async init(modulePath: string): Promise<void> {
+    this.wasmModule = await initWasm(modulePath);
+    this.engine = createEngine(this.currentWidth, this.currentHeight);
     this.primitives = new Primitives(this.engine, this.matrixStack);
     this.layerManager = new LayerManager(this.engine);
     this.fontLoader = new FontLoader(this.engine);
@@ -133,9 +133,9 @@ export class RasterRenderer {
   }
 
   createTexture(width: number, height: number, data: Uint8Array): number {
-    const { ptr, len } = writeBytesToWasm(data);
+    const { ptr, len } = writeBytesToWasm(this.engine, data);
     const id = this.engine.create_texture(width, height, ptr, len);
-    freeWasmBytes(ptr, len);
+    freeWasmBytes(this.engine, ptr, len);
     return id;
   }
 
@@ -184,8 +184,15 @@ export class RasterRenderer {
   }
 
   getMemoryUsage(): number {
-    return this.currentWidth * this.currentHeight * 4 +
-      (this.wasm.memory.buffer.byteLength);
+    let memSize = this.currentWidth * this.currentHeight * 4;
+    try {
+      const mem = getWasmMemory();
+      if (mem && mem.buffer) {
+        memSize += mem.buffer.byteLength;
+      }
+    } catch {
+    }
+    return memSize;
   }
 
   benchmarkTriangles(count: number, size: number): number {
@@ -196,12 +203,13 @@ export class RasterRenderer {
     return this.engine.benchmark_circles(count, radius);
   }
 
+  benchmarkPolygons(count: number, sides: number, radius: number): number {
+    return this.engine.benchmark_polygons(count, sides, radius);
+  }
+
   runBenchmark(primitiveType: string, counts: number[]): BenchmarkResult[] {
     const results: BenchmarkResult[] = [];
     for (const count of counts) {
-      const w = this.currentWidth;
-      const h = this.currentHeight;
-
       this.engine.clear(0, 0, 0, 1);
 
       let frameTime: number;
@@ -211,6 +219,9 @@ export class RasterRenderer {
           break;
         case 'circles':
           frameTime = this.engine.benchmark_circles(count, 20);
+          break;
+        case 'polygons':
+          frameTime = this.engine.benchmark_polygons(count, 6, 25);
           break;
         default:
           frameTime = this.engine.benchmark_triangles(count, 30);

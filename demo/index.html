@@ -118,6 +118,19 @@ body {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 #loading-text { color: #8888cc; font-size: 14px; }
+#error-log {
+  margin-top: 12px;
+  max-width: 400px;
+  max-height: 200px;
+  overflow-y: auto;
+  background: #200;
+  color: #faa;
+  padding: 10px;
+  font-family: monospace;
+  font-size: 11px;
+  border-radius: 4px;
+  display: none;
+}
 </style>
 </head>
 <body>
@@ -125,6 +138,7 @@ body {
 <div id="loading-overlay">
   <div class="spinner"></div>
   <div id="loading-text">Initializing WebAssembly Rasterizer...</div>
+  <div id="error-log"></div>
 </div>
 
 <div id="app">
@@ -144,19 +158,19 @@ body {
 
     <div class="panel">
       <h3>Demo Scenes</h3>
-      <button class="btn active" onclick="switchScene('basic')">Basic Primitives</button>
-      <button class="btn" onclick="switchScene('layers')">Layer Compositing</button>
-      <button class="btn" onclick="switchScene('msaa')">MSAA Compare</button>
-      <button class="btn" onclick="switchScene('bezier')">Bezier Curves</button>
-      <button class="btn" onclick="switchScene('polygon')">Polygons</button>
-      <button class="btn" onclick="switchScene('stress')">Stress Test</button>
+      <button class="btn active" data-scene="basic" onclick="switchScene('basic', this)">Basic Primitives</button>
+      <button class="btn" data-scene="layers" onclick="switchScene('layers', this)">Layer Compositing</button>
+      <button class="btn" data-scene="msaa" onclick="switchScene('msaa', this)">MSAA Compare</button>
+      <button class="btn" data-scene="bezier" onclick="switchScene('bezier', this)">Bezier Curves</button>
+      <button class="btn" data-scene="polygon" onclick="switchScene('polygon', this)">Polygons</button>
+      <button class="btn" data-scene="stress" onclick="switchScene('stress', this)">Stress Test</button>
     </div>
 
     <div class="panel">
       <h3>Blend Mode Demo</h3>
-      <button class="btn active" onclick="setBlendDemo(0)">AlphaBlend</button>
-      <button class="btn" onclick="setBlendDemo(1)">Additive</button>
-      <button class="btn" onclick="setBlendDemo(2)">Multiply</button>
+      <button class="btn active" data-blend="0" onclick="setBlendDemo(0, this)">AlphaBlend</button>
+      <button class="btn" data-blend="1" onclick="setBlendDemo(1, this)">Additive</button>
+      <button class="btn" data-blend="2" onclick="setBlendDemo(2, this)">Multiply</button>
     </div>
 
     <div class="panel">
@@ -174,7 +188,7 @@ body {
       <h3>Controls</h3>
       <p style="font-size:11px;color:#666;line-height:1.6">
         Mouse drag: Pan camera<br>
-        Scroll: Zoom<br>
+        Scroll: Zoom (scale resolution)<br>
         The renderer runs entirely in CPU via Wasm.<br>
         No WebGL/Canvas hardware acceleration used.
       </p>
@@ -182,35 +196,66 @@ body {
   </div>
 </div>
 
-<script type="module">
-import init, { RasterEngine } from '../raster-engine/pkg/raster_engine.js';
+<script>
+var engine = null;
+var wasmBindgen = null;
+var wasmMemory = null;
+var currentScene = 'basic';
+var currentBlendDemo = 0;
+var animTime = 0;
+var lastTime = 0;
+var fpsCounter = { frames: 0, accum: 0, fps: 0 };
+var running = true;
+var resolutionScale = 1.0;
+var drawCallsPerFrame = 0;
 
-let engine = null;
-let wasmMemory = null;
-let currentScene = 'basic';
-let currentBlendDemo = 0;
-let animTime = 0;
-let lastTime = 0;
-let fpsCounter = { frames: 0, accum: 0, fps: 0 };
-let running = true;
-let resolutionScale = 1.0;
+var canvas = document.getElementById('raster-canvas');
+var ctx = canvas.getContext('2d');
+var CANVAS_W = 800;
+var CANVAS_H = 600;
 
-const canvas = document.getElementById('raster-canvas');
-const ctx = canvas.getContext('2d');
-const CANVAS_W = 800;
-const CANVAS_H = 600;
+function showError(msg) {
+  var el = document.getElementById('error-log');
+  el.style.display = 'block';
+  el.textContent = msg + '\n' + el.textContent;
+}
+
+function writeFloat32ToWasm(engineInstance, dataArray) {
+  var byteLen = dataArray.length * 4;
+  var ptr = engineInstance.malloc(byteLen);
+  var mem = new Uint8Array(wasmMemory.buffer);
+  var src = new Uint8Array(dataArray.buffer, dataArray.byteOffset, byteLen);
+  mem.set(src, ptr);
+  return { ptr: ptr, len: dataArray.length, byteLen: byteLen };
+}
+
+function freeWasmBytes(engineInstance, ptr, byteLen) {
+  engineInstance.free(ptr, byteLen);
+}
 
 async function main() {
   try {
-    const wasmModule = await init();
-    wasmMemory = wasmModule.memory;
-    engine = RasterEngine.new(CANVAS_W, CANVAS_H);
+    var module = await import('../raster-engine/pkg/raster_engine.js');
+    wasmBindgen = module;
+    await module.default();
+    wasmMemory = module.wasm_memory || module.memory;
+    if (!wasmMemory) {
+      wasmMemory = (new WebAssembly.Memory({ initial: 256 }));
+    }
+
+    engine = module.RasterEngine.new(CANVAS_W, CANVAS_H);
+
+    if (module.memory) {
+      wasmMemory = module.memory;
+    }
 
     document.getElementById('loading-overlay').classList.add('hidden');
     lastTime = performance.now();
     requestAnimationFrame(loop);
   } catch (e) {
-    document.getElementById('loading-text').textContent = 'Error: ' + e.message;
+    document.getElementById('loading-text').textContent = 'Error loading Wasm';
+    showError(e.toString());
+    showError('Stack: ' + (e.stack || 'n/a'));
     console.error(e);
   }
 }
@@ -218,9 +263,10 @@ async function main() {
 function loop(timestamp) {
   if (!running || !engine) return;
 
-  const dt = timestamp - lastTime;
+  var dt = timestamp - lastTime;
   lastTime = timestamp;
   animTime += dt * 0.001;
+  drawCallsPerFrame = 0;
 
   fpsCounter.frames++;
   fpsCounter.accum += dt;
@@ -252,38 +298,42 @@ function render() {
 }
 
 function renderBasic() {
-  const t = animTime;
+  var t = animTime;
 
-  for (let i = 0; i < 5; i++) {
-    const x = 100 + i * 140;
-    const y = 150 + Math.sin(t + i * 0.7) * 30;
-    const r = 40 + i * 8;
-    const hue = i / 5;
-    const rgb = hslToRgb(hue, 0.8, 0.6);
+  for (var i = 0; i < 5; i++) {
+    var x = 100 + i * 140;
+    var y = 150 + Math.sin(t + i * 0.7) * 30;
+    var r = 40 + i * 8;
+    var hue = i / 5;
+    var rgb = hslToRgb(hue, 0.8, 0.6);
     engine.draw_circle(x, y, r, rgb[0], rgb[1], rgb[2], 0.8, true);
+    drawCallsPerFrame++;
   }
 
-  for (let i = 0; i < 4; i++) {
-    const x = 80 + i * 180;
-    const y = 320 + Math.cos(t * 1.3 + i) * 20;
-    const w = 120;
-    const h = 80;
-    const hue = (i + 2) / 6;
-    const rgb = hslToRgb(hue, 0.7, 0.5);
-    engine.draw_rect(x, y, w, h, rgb[0], rgb[1], rgb[2], 0.7);
+  for (var i = 0; i < 4; i++) {
+    var x2 = 80 + i * 180;
+    var y2 = 320 + Math.cos(t * 1.3 + i) * 20;
+    var w = 120;
+    var h = 80;
+    var hue2 = (i + 2) / 6;
+    var rgb2 = hslToRgb(hue2, 0.7, 0.5);
+    engine.draw_rect(x2, y2, w, h, rgb2[0], rgb2[1], rgb2[2], 0.7);
+    drawCallsPerFrame++;
   }
 
   engine.draw_line(50, 450, 750, 450, 0.9, 0.9, 0.9, 0.5, 2);
   engine.draw_line(50, 450, 400 + Math.sin(t) * 100, 520, 0.3, 0.8, 1.0, 0.8, 3);
   engine.draw_line(750, 450, 400 + Math.cos(t) * 100, 520, 1.0, 0.4, 0.6, 0.8, 3);
+  drawCallsPerFrame += 3;
 
   engine.draw_rect_stroke(60, 60, 680, 480, 0.5, 0.5, 0.8, 0.3, 1);
+  drawCallsPerFrame++;
 }
 
 function renderLayers() {
-  const layer1 = engine.create_layer();
-  const layer2 = engine.create_layer();
-  const layer3 = engine.create_layer();
+  var layer1 = engine.create_layer();
+  var layer2 = engine.create_layer();
+  var layer3 = engine.create_layer();
 
   engine.set_layer_blend_mode(layer1, 0);
   engine.set_layer_blend_mode(layer2, 1);
@@ -293,34 +343,40 @@ function renderLayers() {
   engine.set_layer_opacity(layer3, 0.7);
 
   engine.set_active_layer(layer1);
-  engine.clear(0, 0, 0, 0);
-  const cx1 = 300 + Math.sin(animTime) * 50;
+  engine.clear_layer(layer1, 0, 0, 0, 0);
+  var cx1 = 300 + Math.sin(animTime) * 50;
   engine.draw_circle(cx1, 250, 120, 1.0, 0.2, 0.2, 0.8, true);
+  drawCallsPerFrame++;
 
   engine.set_active_layer(layer2);
-  engine.clear(0, 0, 0, 0);
-  const cx2 = 450 + Math.cos(animTime * 0.7) * 50;
+  engine.clear_layer(layer2, 0, 0, 0, 0);
+  var cx2 = 450 + Math.cos(animTime * 0.7) * 50;
   engine.draw_circle(cx2, 280, 110, 0.2, 1.0, 0.2, 0.8, true);
+  drawCallsPerFrame++;
 
   engine.set_active_layer(layer3);
-  engine.clear(0, 0, 0, 0);
-  const cx3 = 375 + Math.sin(animTime * 1.3) * 40;
+  engine.clear_layer(layer3, 0, 0, 0, 0);
+  var cx3 = 375 + Math.sin(animTime * 1.3) * 40;
   engine.draw_circle(cx3, 310, 100, 0.2, 0.2, 1.0, 0.8, true);
+  drawCallsPerFrame++;
 
   engine.set_active_layer(0);
   engine.composite_layer_to_main(layer1);
   engine.composite_layer_to_main(layer2);
   engine.composite_layer_to_main(layer3);
-
-  engine.draw_rect_stroke(100, 80, 600, 400, 0.8, 0.8, 0.8, 0.3, 2);
+  drawCallsPerFrame += 3;
 
   engine.set_blend_mode(0);
+  engine.draw_rect_stroke(100, 80, 600, 400, 0.8, 0.8, 0.8, 0.3, 2);
+  drawCallsPerFrame++;
+
   engine.draw_rect(30, 500, 220, 22, 0.15, 0.15, 0.2, 0.9);
   drawLabel('AlphaBlend', 35, 505);
   engine.draw_rect(280, 500, 220, 22, 0.15, 0.15, 0.2, 0.9);
   drawLabel('Additive', 285, 505);
   engine.draw_rect(530, 500, 220, 22, 0.15, 0.15, 0.2, 0.9);
   drawLabel('Multiply', 535, 505);
+  drawCallsPerFrame += 3;
 
   engine.free_layer(layer1);
   engine.free_layer(layer2);
@@ -328,56 +384,55 @@ function renderLayers() {
 }
 
 function drawLabel(text, x, y) {
-  const colors = {
-    'A': [0.9, 0.9, 0.9, 1.0],
-    'B': [0.9, 0.9, 0.9, 1.0],
-    'M': [0.9, 0.9, 0.9, 1.0],
-  };
-  for (let i = 0; i < text.length; i++) {
-    const px = x + i * 10;
-    const ch = text.charCodeAt(i);
-    drawCharGlyph(engine, ch, px, y, 0.85, 0.85, 0.95, 1.0);
+  for (var i = 0; i < text.length; i++) {
+    var px = x + i * 10;
+    var ch = text.charCodeAt(i);
+    drawCharGlyph(ch, px, y, 0.85, 0.85, 0.95, 1.0);
   }
 }
 
-function drawCharGlyph(eng, ch, x, y, r, g, b, a) {
-  const segments = getCharSegments(ch);
-  for (const seg of segments) {
-    eng.draw_line(x + seg[0], y + seg[1], x + seg[2], y + seg[3], r, g, b, a, 1.5);
+function drawCharGlyph(ch, x, y, r, g, b, a) {
+  var segments = getCharSegments(ch);
+  for (var i = 0; i < segments.length; i += 2) {
+    engine.draw_line(
+      x + segments[i][0], y + segments[i][1],
+      x + segments[i + 1][0], y + segments[i + 1][1],
+      r, g, b, a, 1.5
+    );
+    drawCallsPerFrame++;
   }
 }
 
 function getCharSegments(ch) {
-  const S = 6;
-  const segs = {
-    65: [[0,S*2],[0,0],[0,0],[S*2,0],[S*2,0],[S*2,S*2],[0,S*1],[S*2,S*1]],
-    66: [[0,0],[0,S*2],[0,0],[S*1.5,0],[S*1.5,0],[S*2,S*.5],[S*2,S*.5],[S*1.5,S*1],[0,S*1],[S*1.5,S*1],[0,S*1],[0,S*2],[S*1.5,S*1],[S*1.5,S*2],[S*1.5,S*2],[0,S*2]],
-    67: [[S*2,0],[S*.5,0],[S*.5,0],[0,S*.5],[0,S*.5],[0,S*1.5],[0,S*1.5],[S*.5,S*2],[S*.5,S*2],[S*2,S*2]],
-    68: [[0,0],[0,S*2],[0,0],[S*1.5,0],[S*1.5,0],[S*2,S*.5],[S*2,S*.5],[S*2,S*1.5],[S*2,S*1.5],[S*1.5,S*2],[S*1.5,S*2],[0,S*2]],
-    69: [[S*2,0],[0,0],[0,0],[0,S*2],[0,S*2],[S*2,S*2],[0,S*1],[S*1.5,S*1]],
-    70: [[S*2,0],[0,0],[0,0],[0,S*2],[0,S*1],[S*1.5,S*1]],
-    71: [[S*2,S*.5],[S*1.5,0],[S*1.5,0],[S*.5,0],[S*.5,0],[0,S*.5],[0,S*.5],[0,S*1.5],[0,S*1.5],[S*.5,S*2],[S*.5,S*2],[S*2,S*2],[S*2,S*2],[S*2,S*1],[S*1.2,S*1]],
-    72: [[0,0],[0,S*2],[S*2,0],[S*2,S*2],[0,S*1],[S*2,S*1]],
-    73: [[0,0],[S*2,0],[S,S*0],[S,S*2],[0,S*2],[S*2,S*2]],
-    76: [[0,0],[0,S*2],[0,S*2],[S*2,S*2]],
-    77: [[0,S*2],[0,0],[0,0],[S*1,S*1],[S*1,S*1],[S*2,0],[S*2,0],[S*2,S*2]],
-    80: [[0,0],[0,S*2],[0,0],[S*1.5,0],[S*1.5,0],[S*2,S*.5],[S*2,S*.5],[S*1.5,S*1],[S*1.5,S*1],[0,S*1]],
-    84: [[0,0],[S*2,0],[S*1,0],[S*1,S*2]],
-    85: [[0,0],[0,S*1.5],[0,S*1.5],[S*.5,S*2],[S*.5,S*2],[S*1.5,S*2],[S*1.5,S*2],[S*2,S*1.5],[S*2,S*1.5],[S*2,0]],
-    88: [[0,0],[S*2,S*2],[S*2,0],[0,S*2]],
-    89: [[0,0],[S*1,S*1],[S*2,0],[S*1,S*1],[S*1,S*1],[S*1,S*2]],
-    105: [[S,0],[S,S*.1],[S,S*.5],[S,S*2]],
-    108: [[S*.5,0],[S*.5,S*2]],
-    112: [[0,S*.5],[0,S*2],[0,S*.5],[S*1.5,S*.5],[S*1.5,S*.5],[S*2,S*1],[S*2,S*1],[S*1.5,S*1.5],[S*1.5,S*1.5],[0,S*1.5]],
-    116: [[0,S*.5],[S*2,S*.5],[S*1,S*.5],[S*1,S*2],[S*1,0],[S*1,S*.5]],
-    101: [[S*2,S*.5],[S*.5,S*.5],[S*.5,S*.5],[0,S*1],[0,S*1],[S*.5,S*2],[S*.5,S*2],[S*2,S*2],[S*.5,S*1],[S*2,S*1]],
-    114: [[0,S*.5],[0,S*2],[0,S*.5],[S*1,S*.5],[S*1,S*.5],[S*2,S*0],[S*2,S*0],[S*1.5,S*.3]],
-    115: [[S*2,S*.5],[S*.5,S*.5],[S*.5,S*.5],[0,S*.8],[0,S*.8],[S*.5,S*1.2],[S*.5,S*1.2],[S*2,S*1.5],[S*2,S*1.5],[S*.5,S*2]],
-    100: [[S*1.5,0],[S*1.5,S*2],[S*1.5,S*.5],[S*.5,S*.5],[S*.5,S*.5],[0,S*1],[0,S*1],[S*.5,S*1.5],[S*.5,S*1.5],[S*1.5,S*1.5]],
-    111: [[S*.5,S*.5],[0,S*1],[0,S*1],[S*.5,S*1.5],[S*.5,S*1.5],[S*1.5,S*1.5],[S*1.5,S*1.5],[S*2,S*1],[S*2,S*1],[S*.5,S*.5],[S*1.5,S*.5],[S*2,S*1]],
-    119: [[0,S*.5],[S*.5,S*2],[S*.5,S*2],[S*1,S*1],[S*1,S*1],[S*1.5,S*2],[S*1.5,S*2],[S*2,S*.5]],
-    110: [[0,S*2],[0,S*.5],[0,S*.5],[S*.5,S*.5],[S*.5,S*.5],[S*2,S*1],[S*2,S*1],[S*2,S*2]],
-  };
+  var S = 6;
+  var segs = {};
+  segs[65] = [[0,S*2],[0,0],[0,0],[S*2,0],[S*2,0],[S*2,S*2],[0,S*1],[S*2,S*1]];
+  segs[66] = [[0,0],[0,S*2],[0,0],[S*1.5,0],[S*1.5,0],[S*2,S*.5],[S*2,S*.5],[S*1.5,S*1],[0,S*1],[S*1.5,S*1],[0,S*1],[0,S*2],[S*1.5,S*1],[S*1.5,S*2],[S*1.5,S*2],[0,S*2]];
+  segs[67] = [[S*2,0],[S*.5,0],[S*.5,0],[0,S*.5],[0,S*.5],[0,S*1.5],[0,S*1.5],[S*.5,S*2],[S*.5,S*2],[S*2,S*2]];
+  segs[68] = [[0,0],[0,S*2],[0,0],[S*1.5,0],[S*1.5,0],[S*2,S*.5],[S*2,S*.5],[S*2,S*1.5],[S*2,S*1.5],[S*1.5,S*2],[S*1.5,S*2],[0,S*2]];
+  segs[69] = [[S*2,0],[0,0],[0,0],[0,S*2],[0,S*2],[S*2,S*2],[0,S*1],[S*1.5,S*1]];
+  segs[70] = [[S*2,0],[0,0],[0,0],[0,S*2],[0,S*1],[S*1.5,S*1]];
+  segs[71] = [[S*2,S*.5],[S*1.5,0],[S*1.5,0],[S*.5,0],[S*.5,0],[0,S*.5],[0,S*.5],[0,S*1.5],[0,S*1.5],[S*.5,S*2],[S*.5,S*2],[S*2,S*2],[S*2,S*2],[S*2,S*1],[S*1.2,S*1]];
+  segs[72] = [[0,0],[0,S*2],[S*2,0],[S*2,S*2],[0,S*1],[S*2,S*1]];
+  segs[73] = [[0,0],[S*2,0],[S,S*0],[S,S*2],[0,S*2],[S*2,S*2]];
+  segs[76] = [[0,0],[0,S*2],[0,S*2],[S*2,S*2]];
+  segs[77] = [[0,S*2],[0,0],[0,0],[S*1,S*1],[S*1,S*1],[S*2,0],[S*2,0],[S*2,S*2]];
+  segs[80] = [[0,0],[0,S*2],[0,0],[S*1.5,0],[S*1.5,0],[S*2,S*.5],[S*2,S*.5],[S*1.5,S*1],[S*1.5,S*1],[0,S*1]];
+  segs[84] = [[0,0],[S*2,0],[S*1,0],[S*1,S*2]];
+  segs[85] = [[0,0],[0,S*1.5],[0,S*1.5],[S*.5,S*2],[S*.5,S*2],[S*1.5,S*2],[S*1.5,S*2],[S*2,S*1.5],[S*2,S*1.5],[S*2,0]];
+  segs[88] = [[0,0],[S*2,S*2],[S*2,0],[0,S*2]];
+  segs[89] = [[0,0],[S*1,S*1],[S*2,0],[S*1,S*1],[S*1,S*1],[S*1,S*2]];
+  segs[105] = [[S,0],[S,S*.1],[S,S*.5],[S,S*2]];
+  segs[108] = [[S*.5,0],[S*.5,S*2]];
+  segs[112] = [[0,S*.5],[0,S*2],[0,S*.5],[S*1.5,S*.5],[S*1.5,S*.5],[S*2,S*1],[S*2,S*1],[S*1.5,S*1.5],[S*1.5,S*1.5],[0,S*1.5]];
+  segs[116] = [[0,S*.5],[S*2,S*.5],[S*1,S*.5],[S*1,S*2],[S*1,0],[S*1,S*.5]];
+  segs[101] = [[S*2,S*.5],[S*.5,S*.5],[S*.5,S*.5],[0,S*1],[0,S*1],[S*.5,S*2],[S*.5,S*2],[S*2,S*2],[S*.5,S*1],[S*2,S*1]];
+  segs[114] = [[0,S*.5],[0,S*2],[0,S*.5],[S*1,S*.5],[S*1,S*.5],[S*2,S*0],[S*2,S*0],[S*1.5,S*.3]];
+  segs[115] = [[S*2,S*.5],[S*.5,S*.5],[S*.5,S*.5],[0,S*.8],[0,S*.8],[S*.5,S*1.2],[S*.5,S*1.2],[S*2,S*1.5],[S*2,S*1.5],[S*.5,S*2]];
+  segs[100] = [[S*1.5,0],[S*1.5,S*2],[S*1.5,S*.5],[S*.5,S*.5],[S*.5,S*.5],[0,S*1],[0,S*1],[S*.5,S*1.5],[S*.5,S*1.5],[S*1.5,S*1.5]];
+  segs[111] = [[S*.5,S*.5],[0,S*1],[0,S*1],[S*.5,S*1.5],[S*.5,S*1.5],[S*1.5,S*1.5],[S*1.5,S*1.5],[S*2,S*1],[S*2,S*1],[S*.5,S*.5],[S*1.5,S*.5],[S*2,S*1]];
+  segs[119] = [[0,S*.5],[S*.5,S*2],[S*.5,S*2],[S*1,S*1],[S*1,S*1],[S*1.5,S*2],[S*1.5,S*2],[S*2,S*.5]];
+  segs[110] = [[0,S*2],[0,S*.5],[0,S*.5],[S*.5,S*.5],[S*.5,S*.5],[S*2,S*1],[S*2,S*1],[S*2,S*2]];
   return segs[ch] || [];
 }
 
@@ -386,39 +441,43 @@ function renderMSAA() {
 
   engine.draw_rect(30, 30, 350, 25, 0.15, 0.15, 0.2, 0.9);
   drawLabel('Without MSAA', 35, 35);
+  drawCallsPerFrame++;
 
   engine.draw_rect(420, 30, 350, 25, 0.15, 0.15, 0.2, 0.9);
   drawLabel('With MSAA 4x', 425, 35);
+  drawCallsPerFrame++;
 
   engine.draw_rect(30, 60, 350, 250, 0.08, 0.08, 0.1, 1.0);
   engine.draw_rect(420, 60, 350, 250, 0.08, 0.08, 0.1, 1.0);
+  drawCallsPerFrame += 2;
 
-  for (let i = 0; i < 6; i++) {
-    const x = 80 + i * 50;
-    const y = 180 + Math.sin(animTime + i * 0.5) * 40;
-    const rgb = hslToRgb(i / 6, 0.9, 0.7);
+  for (var i = 0; i < 6; i++) {
+    var x = 80 + i * 50;
+    var y = 180 + Math.sin(animTime + i * 0.5) * 40;
+    var rgb = hslToRgb(i / 6, 0.9, 0.7);
     engine.draw_circle(x, y, 25, rgb[0], rgb[1], rgb[2], 0.9, false);
+    drawCallsPerFrame++;
   }
 
-  for (let i = 0; i < 6; i++) {
-    const x = 470 + i * 50;
-    const y = 180 + Math.sin(animTime + i * 0.5) * 40;
-    const rgb = hslToRgb(i / 6, 0.9, 0.7);
-    engine.draw_circle(x, y, 25, rgb[0], rgb[1], rgb[2], 0.9, true);
+  for (var i = 0; i < 6; i++) {
+    var x2 = 470 + i * 50;
+    var y2 = 180 + Math.sin(animTime + i * 0.5) * 40;
+    var rgb2 = hslToRgb(i / 6, 0.9, 0.7);
+    engine.draw_circle(x2, y2, 25, rgb2[0], rgb2[1], rgb2[2], 0.9, true);
+    drawCallsPerFrame++;
   }
 
-  const triSize = 40;
-  for (let i = 0; i < 4; i++) {
-    const cx = 120 + i * 70;
-    const cy = 260 + Math.sin(animTime * 0.8 + i) * 20;
-    const rgb = hslToRgb((i + 2) / 6, 0.8, 0.6);
-    const angle = animTime + i;
-    const x0 = cx;
-    const y0 = cy - triSize;
-    const x1 = cx - triSize * 0.866;
-    const y1 = cy + triSize * 0.5;
-    const x2 = cx + triSize * 0.866;
-    const y2 = cy + triSize * 0.5;
+  var triSize = 40;
+  for (var i = 0; i < 4; i++) {
+    var cx = 120 + i * 70;
+    var cy = 260 + Math.sin(animTime * 0.8 + i) * 20;
+    var rgb = hslToRgb((i + 2) / 6, 0.8, 0.6);
+    var x0 = cx;
+    var y0 = cy - triSize;
+    var x1 = cx - triSize * 0.866;
+    var y1 = cy + triSize * 0.5;
+    var x2 = cx + triSize * 0.866;
+    var y2 = cy + triSize * 0.5;
     engine.draw_triangle_filled(
       x0, y0, 0.5, 0, 1,
       x1, y1, 0, 1, 1,
@@ -426,56 +485,61 @@ function renderMSAA() {
       rgb[0], rgb[1], rgb[2], 0.9,
       false, 0, false, false
     );
+    drawCallsPerFrame++;
   }
 
-  for (let i = 0; i < 4; i++) {
-    const cx = 510 + i * 70;
-    const cy = 260 + Math.sin(animTime * 0.8 + i) * 20;
-    const rgb = hslToRgb((i + 2) / 6, 0.8, 0.6);
-    const x0 = cx;
-    const y0 = cy - triSize;
-    const x1 = cx - triSize * 0.866;
-    const y1 = cy + triSize * 0.5;
-    const x2 = cx + triSize * 0.866;
-    const y2 = cy + triSize * 0.5;
+  for (var i = 0; i < 4; i++) {
+    var cx2 = 510 + i * 70;
+    var cy2 = 260 + Math.sin(animTime * 0.8 + i) * 20;
+    var rgb3 = hslToRgb((i + 2) / 6, 0.8, 0.6);
+    var a0 = cx2;
+    var b0 = cy2 - triSize;
+    var a1 = cx2 - triSize * 0.866;
+    var b1 = cy2 + triSize * 0.5;
+    var a2 = cx2 + triSize * 0.866;
+    var b2 = cy2 + triSize * 0.5;
     engine.draw_triangle_filled(
-      x0, y0, 0.5, 0, 1,
-      x1, y1, 0, 1, 1,
-      x2, y2, 1, 1, 1,
-      rgb[0], rgb[1], rgb[2], 0.9,
+      a0, b0, 0.5, 0, 1,
+      a1, b1, 0, 1, 1,
+      a2, b2, 1, 1, 1,
+      rgb3[0], rgb3[1], rgb3[2], 0.9,
       false, 0, false, true
     );
+    drawCallsPerFrame++;
   }
 
-  for (let i = 0; i < 5; i++) {
-    const x = 100 + i * 60;
-    const y = 400 + Math.sin(animTime + i) * 25;
-    const rgb = hslToRgb(i / 5, 0.8, 0.6);
-    engine.draw_line(x - 20, y, x + 20, y + 30, rgb[0], rgb[1], rgb[2], 0.9, 2);
+  for (var i = 0; i < 5; i++) {
+    var lx = 100 + i * 60;
+    var ly = 400 + Math.sin(animTime + i) * 25;
+    var lrgb = hslToRgb(i / 5, 0.8, 0.6);
+    engine.draw_line(lx - 20, ly, lx + 20, ly + 30, lrgb[0], lrgb[1], lrgb[2], 0.9, 2);
+    drawCallsPerFrame++;
   }
 
-  for (let i = 0; i < 5; i++) {
-    const x = 480 + i * 60;
-    const y = 400 + Math.sin(animTime + i) * 25;
-    const rgb = hslToRgb(i / 5, 0.8, 0.6);
-    engine.draw_line(x - 20, y, x + 20, y + 30, rgb[0], rgb[1], rgb[2], 0.9, 2);
+  for (var i = 0; i < 5; i++) {
+    var lx2 = 480 + i * 60;
+    var ly2 = 400 + Math.sin(animTime + i) * 25;
+    var lrgb2 = hslToRgb(i / 5, 0.8, 0.6);
+    engine.draw_line(lx2 - 20, ly2, lx2 + 20, ly2 + 30, lrgb2[0], lrgb2[1], lrgb2[2], 0.9, 2);
+    drawCallsPerFrame++;
   }
 }
 
 function renderBezier() {
-  const t = animTime;
+  var t = animTime;
 
   engine.draw_rect(30, 30, 740, 25, 0.15, 0.15, 0.2, 0.9);
   drawLabel('Bezier Curves Demo', 35, 35);
+  drawCallsPerFrame++;
 
-  for (let i = 0; i < 6; i++) {
-    const yBase = 100 + i * 80;
-    const rgb = hslToRgb(i / 6, 0.9, 0.7);
+  for (var i = 0; i < 6; i++) {
+    var yBase = 100 + i * 80;
+    var rgb = hslToRgb(i / 6, 0.9, 0.7);
 
-    const cp1x = 200 + Math.sin(t + i * 0.5) * 80;
-    const cp1y = yBase - 30 + Math.cos(t + i * 0.3) * 30;
-    const cp2x = 600 + Math.cos(t + i * 0.7) * 80;
-    const cp2y = yBase + 30 + Math.sin(t + i * 0.4) * 30;
+    var cp1x = 200 + Math.sin(t + i * 0.5) * 80;
+    var cp1y = yBase - 30 + Math.cos(t + i * 0.3) * 30;
+    var cp2x = 600 + Math.cos(t + i * 0.7) * 80;
+    var cp2y = yBase + 30 + Math.sin(t + i * 0.4) * 30;
 
     engine.draw_cubic_bezier(
       50, yBase,
@@ -484,97 +548,95 @@ function renderBezier() {
       750, yBase,
       rgb[0], rgb[1], rgb[2], 0.9, 3, 24
     );
+    drawCallsPerFrame++;
 
     engine.draw_circle(50, yBase, 4, 1, 1, 1, 0.5, false);
     engine.draw_circle(750, yBase, 4, 1, 1, 1, 0.5, false);
     engine.draw_circle(cp1x, cp1y, 3, 1, 0.5, 0.5, 0.4, false);
     engine.draw_circle(cp2x, cp2y, 3, 0.5, 0.5, 1, 0.4, false);
+    drawCallsPerFrame += 4;
   }
 
-  for (let i = 0; i < 8; i++) {
-    const x = 80 + i * 85;
-    const cpx = x + 40 + Math.sin(t * 1.5 + i) * 30;
-    const cpy = 500 - Math.abs(Math.sin(t + i * 0.5)) * 40;
-    const rgb = hslToRgb((i + 3) / 11, 0.8, 0.6);
-    engine.draw_quad_bezier(x, 530, cpx, cpy, x + 80, 530, rgb[0], rgb[1], rgb[2], 0.8, 2, 16);
+  for (var i = 0; i < 8; i++) {
+    var x = 80 + i * 85;
+    var cpx = x + 40 + Math.sin(t * 1.5 + i) * 30;
+    var cpy = 500 - Math.abs(Math.sin(t + i * 0.5)) * 40;
+    var rgb2 = hslToRgb((i + 3) / 11, 0.8, 0.6);
+    engine.draw_quad_bezier(x, 530, cpx, cpy, x + 80, 530, rgb2[0], rgb2[1], rgb2[2], 0.8, 2, 16);
+    drawCallsPerFrame++;
   }
 }
 
 function renderPolygon() {
-  const t = animTime;
+  var t = animTime;
 
   engine.draw_rect(30, 30, 740, 25, 0.15, 0.15, 0.2, 0.9);
   drawLabel('Polygon Rasterization', 35, 35);
+  drawCallsPerFrame++;
 
-  for (let i = 0; i < 5; i++) {
-    const cx = 120 + i * 150;
-    const cy = 200 + Math.sin(t + i * 0.6) * 30;
-    const sides = 3 + i;
-    const radius = 50 + i * 5;
-    const rotation = t * (0.3 + i * 0.1);
+  for (var i = 0; i < 5; i++) {
+    var cx = 120 + i * 150;
+    var cy = 200 + Math.sin(t + i * 0.6) * 30;
+    var sides = 3 + i;
+    var radius = 50 + i * 5;
+    var rotation = t * (0.3 + i * 0.1);
 
-    const points = [];
-    for (let j = 0; j < sides; j++) {
-      const angle = (j / sides) * Math.PI * 2 + rotation;
+    var points = [];
+    for (var j = 0; j < sides; j++) {
+      var angle = (j / sides) * Math.PI * 2 + rotation;
       points.push(Math.cos(angle) * radius + cx);
       points.push(Math.sin(angle) * radius + cy);
     }
 
-    const rgb = hslToRgb(i / 5, 0.8, 0.6);
-    const pointsPtr = engine.__wbindgen_malloc !== undefined ?
-      allocAndWrite(engine, new Float32Array(points)) : null;
-
-    if (pointsPtr) {
-      engine.draw_polygon(pointsPtr.ptr, points.length, rgb[0], rgb[1], rgb[2], 0.8, true);
-      engine.__wbindgen_free(pointsPtr.ptr, points.length * 4);
-    }
+    var rgb = hslToRgb(i / 5, 0.8, 0.6);
+    drawPolygonFloatArray(points, rgb[0], rgb[1], rgb[2], 0.8, true);
+    drawCallsPerFrame++;
   }
 
-  for (let i = 0; i < 6; i++) {
-    const cx = 100 + i * 120;
-    const cy = 420 + Math.cos(t * 0.7 + i * 0.8) * 20;
-    const radius = 30;
-    const starPoints = [];
-    for (let j = 0; j < 10; j++) {
-      const angle = (j / 10) * Math.PI * 2 - Math.PI / 2 + t * 0.2;
-      const r = j % 2 === 0 ? radius : radius * 0.4;
-      starPoints.push(Math.cos(angle) * r + cx);
-      starPoints.push(Math.sin(angle) * r + cy);
+  for (var i = 0; i < 6; i++) {
+    var cx2 = 100 + i * 120;
+    var cy2 = 420 + Math.cos(t * 0.7 + i * 0.8) * 20;
+    var radius2 = 30;
+    var starPoints = [];
+    for (var j = 0; j < 10; j++) {
+      var angle2 = (j / 10) * Math.PI * 2 - Math.PI / 2 + t * 0.2;
+      var r2 = j % 2 === 0 ? radius2 : radius2 * 0.4;
+      starPoints.push(Math.cos(angle2) * r2 + cx2);
+      starPoints.push(Math.sin(angle2) * r2 + cy2);
     }
 
-    const rgb = hslToRgb((i + 2) / 8, 0.9, 0.65);
-    const pointsPtr = allocAndWrite(engine, new Float32Array(starPoints));
-    if (pointsPtr) {
-      engine.draw_polygon(pointsPtr.ptr, starPoints.length, rgb[0], rgb[1], rgb[2], 0.85, true);
-      engine.__wbindgen_free(pointsPtr.ptr, starPoints.length * 4);
-    }
+    var rgb2 = hslToRgb((i + 2) / 8, 0.9, 0.65);
+    drawPolygonFloatArray(starPoints, rgb2[0], rgb2[1], rgb2[2], 0.85, true);
+    drawCallsPerFrame++;
   }
 }
 
-function allocAndWrite(eng, data) {
-  try {
-    const ptr = eng.__wbindgen_malloc(data.byteLength);
-    const mem = new Uint8Array(wasmMemory.buffer);
-    mem.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength), ptr);
-    return { ptr, len: data.length };
-  } catch (e) {
-    return null;
+function drawPolygonFloatArray(pointsArray, r, g, b, a, msaa) {
+  var data = new Float32Array(pointsArray);
+  var alloc = writeFloat32ToWasm(engine, data);
+  if (alloc) {
+    try {
+      engine.draw_polygon(alloc.ptr, alloc.len, r, g, b, a, msaa);
+    } finally {
+      freeWasmBytes(engine, alloc.ptr, alloc.byteLen);
+    }
   }
 }
 
 function renderStress() {
-  const t = animTime;
+  var t = animTime;
   engine.set_blend_mode(0);
 
   engine.draw_rect(30, 30, 740, 25, 0.15, 0.15, 0.2, 0.9);
   drawLabel('Stress Test', 35, 35);
+  drawCallsPerFrame++;
 
-  const triCount = 100;
-  for (let i = 0; i < triCount; i++) {
-    const x = (i * 37 + t * 20) % CANVAS_W;
-    const y = 70 + ((i * 53) % (CANVAS_H - 100));
-    const size = 10 + (i % 5) * 5;
-    const rgb = hslToRgb(i / triCount, 0.8, 0.6);
+  var triCount = 100;
+  for (var i = 0; i < triCount; i++) {
+    var x = (i * 37 + t * 20) % CANVAS_W;
+    var y = 70 + ((i * 53) % (CANVAS_H - 100));
+    var size = 10 + (i % 5) * 5;
+    var rgb = hslToRgb(i / triCount, 0.8, 0.6);
 
     engine.draw_triangle_filled(
       x, y - size, 0, 0, 1,
@@ -583,41 +645,47 @@ function renderStress() {
       rgb[0], rgb[1], rgb[2], 0.5,
       false, 0, false, false
     );
+    drawCallsPerFrame++;
   }
 
-  for (let i = 0; i < 50; i++) {
-    const x = (i * 47 + t * 30) % CANVAS_W;
-    const y = 70 + ((i * 61) % (CANVAS_H - 100));
-    const r = 5 + (i % 7) * 3;
-    const rgb = hslToRgb((i + 50) / 100, 0.7, 0.5);
-    engine.draw_circle(x, y, r, rgb[0], rgb[1], rgb[2], 0.4, false);
+  for (var i = 0; i < 50; i++) {
+    var cx = (i * 47 + t * 30) % CANVAS_W;
+    var cy = 70 + ((i * 61) % (CANVAS_H - 100));
+    var radius = 5 + (i % 7) * 3;
+    var rgb2 = hslToRgb((i + 50) / 100, 0.7, 0.5);
+    engine.draw_circle(cx, cy, radius, rgb2[0], rgb2[1], rgb2[2], 0.4, false);
+    drawCallsPerFrame++;
   }
 
-  for (let i = 0; i < 20; i++) {
-    const x0 = (i * 41) % CANVAS_W;
-    const y0 = 70 + (i * 67) % (CANVAS_H - 100);
-    const x1 = x0 + Math.sin(t + i) * 50;
-    const y1 = y0 + Math.cos(t + i * 0.7) * 50;
-    const rgb = hslToRgb((i + 80) / 100, 0.6, 0.5);
-    engine.draw_line(x0, y0, x1, y1, rgb[0], rgb[1], rgb[2], 0.3, 1);
+  for (var i = 0; i < 20; i++) {
+    var x0 = (i * 41) % CANVAS_W;
+    var y0 = 70 + (i * 67) % (CANVAS_H - 100);
+    var x1 = x0 + Math.sin(t + i) * 50;
+    var y1 = y0 + Math.cos(t + i * 0.7) * 50;
+    var rgb3 = hslToRgb((i + 80) / 100, 0.6, 0.5);
+    engine.draw_line(x0, y0, x1, y1, rgb3[0], rgb3[1], rgb3[2], 0.3, 1);
+    drawCallsPerFrame++;
   }
 }
 
 function present() {
   try {
-    const ptr = engine.get_buffer_ptr();
-    const len = engine.get_buffer_len();
-    const width = engine.get_width();
-    const height = engine.get_height();
+    if (!wasmMemory || !wasmMemory.buffer) return;
+    var ptr = engine.get_buffer_ptr();
+    var len = engine.get_buffer_len();
+    var width = engine.get_width();
+    var height = engine.get_height();
 
-    const view = new Uint8ClampedArray(wasmMemory.buffer, ptr, len);
-    const imageData = new ImageData(view, width, height);
+    if (ptr === 0 || len === 0) return;
+
+    var view = new Uint8ClampedArray(wasmMemory.buffer, ptr, len);
+    var imageData = new ImageData(view, width, height);
 
     if (width !== CANVAS_W || height !== CANVAS_H) {
-      const tmpCanvas = document.createElement('canvas');
+      var tmpCanvas = document.createElement('canvas');
       tmpCanvas.width = width;
       tmpCanvas.height = height;
-      const tmpCtx = tmpCanvas.getContext('2d');
+      var tmpCtx = tmpCanvas.getContext('2d');
       tmpCtx.putImageData(imageData, 0, 0);
       ctx.imageSmoothingEnabled = true;
       ctx.drawImage(tmpCanvas, 0, 0, CANVAS_W, CANVAS_H);
@@ -630,32 +698,41 @@ function present() {
 }
 
 function updateStats(dt) {
-  const fpsEl = document.getElementById('stat-fps');
-  const ftEl = document.getElementById('stat-frametime');
-  const resEl = document.getElementById('stat-resolution');
-  const scaleEl = document.getElementById('stat-scale');
-  const memEl = document.getElementById('stat-memory');
-  const dcEl = document.getElementById('stat-drawcalls');
+  var fpsEl = document.getElementById('stat-fps');
+  var ftEl = document.getElementById('stat-frametime');
+  var resEl = document.getElementById('stat-resolution');
+  var scaleEl = document.getElementById('stat-scale');
+  var memEl = document.getElementById('stat-memory');
+  var dcEl = document.getElementById('stat-drawcalls');
 
-  const fps = fpsCounter.fps;
+  var fps = fpsCounter.fps;
   fpsEl.textContent = String(fps);
   fpsEl.className = 'stat-value ' + (fps >= 55 ? 'good' : fps >= 30 ? 'warn' : 'bad');
 
   ftEl.textContent = dt.toFixed(1) + ' ms';
   ftEl.className = 'stat-value ' + (dt < 17 ? 'good' : dt < 33 ? 'warn' : 'bad');
 
-  resEl.textContent = CANVAS_W + 'x' + CANVAS_H;
+  if (engine) {
+    resEl.textContent = engine.get_width() + 'x' + engine.get_height();
+  } else {
+    resEl.textContent = CANVAS_W + 'x' + CANVAS_H;
+  }
   scaleEl.textContent = Math.round(resolutionScale * 100) + '%';
-  memEl.textContent = (wasmMemory.buffer.byteLength / 1024 / 1024).toFixed(1) + ' MB';
-  dcEl.textContent = '0';
+
+  if (wasmMemory && wasmMemory.buffer) {
+    memEl.textContent = (wasmMemory.buffer.byteLength / 1024 / 1024).toFixed(1) + ' MB';
+  } else {
+    memEl.textContent = '0 MB';
+  }
+  dcEl.textContent = String(drawCallsPerFrame);
 }
 
 function hslToRgb(h, s, l) {
-  let r, g, b;
+  var r, g, b;
   if (s === 0) { r = g = b = l; }
   else {
-    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-    const p = 2 * l - q;
+    var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    var p = 2 * l - q;
     r = hue2rgb(p, q, h + 1/3);
     g = hue2rgb(p, q, h);
     b = hue2rgb(p, q, h - 1/3);
@@ -672,77 +749,85 @@ function hue2rgb(p, q, t) {
   return p;
 }
 
-window.switchScene = function(scene) {
+function switchScene(scene, btn) {
   currentScene = scene;
-  document.querySelectorAll('.panel:nth-child(2) .btn').forEach(b => b.classList.remove('active'));
-  event.target.classList.add('active');
-};
+  var buttons = document.querySelectorAll('[data-scene]');
+  for (var i = 0; i < buttons.length; i++) {
+    buttons[i].classList.remove('active');
+  }
+  if (btn) btn.classList.add('active');
+}
 
-window.setBlendDemo = function(mode) {
+function setBlendDemo(mode, btn) {
   currentBlendDemo = mode;
-  document.querySelectorAll('.panel:nth-child(3) .btn').forEach(b => b.classList.remove('active'));
-  event.target.classList.add('active');
-};
+  var buttons = document.querySelectorAll('[data-blend]');
+  for (var i = 0; i < buttons.length; i++) {
+    buttons[i].classList.remove('active');
+  }
+  if (btn) btn.classList.add('active');
+}
 
-window.runBenchmark = function(type) {
+function runBenchmark(type) {
   if (!engine) return;
 
-  engine.resize(CANVAS_W, CANVAS_H);
-  const counts = [10, 50, 100, 200, 500, 1000];
-  const tbody = document.querySelector('#bench-results tbody');
+  engine.set_blend_mode(0);
+  engine.set_active_layer(0);
+  var counts = [10, 50, 100, 200, 500, 1000];
+  var tbody = document.querySelector('#bench-results tbody');
   tbody.innerHTML = '';
 
-  for (const count of counts) {
+  for (var ci = 0; ci < counts.length; ci++) {
+    var count = counts[ci];
     engine.clear(0, 0, 0, 1);
-    let time: number;
+    var time = 0;
 
-    switch (type) {
-      case 'triangles':
-        time = engine.benchmark_triangles(count, 30);
-        break;
-      case 'circles':
-        time = engine.benchmark_circles(count, 20);
-        break;
-      default:
-        time = engine.benchmark_triangles(count, 30);
+    if (type === 'triangles') {
+      time = engine.benchmark_triangles(count, 30);
+    } else if (type === 'circles') {
+      time = engine.benchmark_circles(count, 20);
+    } else if (type === 'polygons') {
+      time = engine.benchmark_polygons(count, 6, 25);
     }
 
-    const mem = (wasmMemory.buffer.byteLength / 1024 / 1024).toFixed(2);
-    const row = document.createElement('tr');
-    row.innerHTML = `<td>${count}</td><td>${time.toFixed(2)}</td><td>${mem}</td>`;
+    var mem = '0';
+    if (wasmMemory && wasmMemory.buffer) {
+      mem = (wasmMemory.buffer.byteLength / 1024 / 1024).toFixed(2);
+    }
+    var row = document.createElement('tr');
+    row.innerHTML = '<td>' + count + '</td><td>' + time.toFixed(2) + '</td><td>' + mem + '</td>';
     tbody.appendChild(row);
   }
 
-  engine.resize(CANVAS_W, CANVAS_H);
-};
+  engine.clear(0.04, 0.04, 0.06, 1);
+}
 
-let isDragging = false;
-let lastMouseX = 0;
-let lastMouseY = 0;
+var isDragging = false;
+var lastMouseX = 0;
+var lastMouseY = 0;
 
-canvas.addEventListener('mousedown', (e) => {
+canvas.addEventListener('mousedown', function(e) {
   isDragging = true;
   lastMouseX = e.clientX;
   lastMouseY = e.clientY;
 });
 
-window.addEventListener('mouseup', () => { isDragging = false; });
+window.addEventListener('mouseup', function() { isDragging = false; });
 
-window.addEventListener('mousemove', (e) => {
+window.addEventListener('mousemove', function(e) {
   if (!isDragging) return;
-  const dx = e.clientX - lastMouseX;
-  const dy = e.clientY - lastMouseY;
+  var dx = e.clientX - lastMouseX;
+  var dy = e.clientY - lastMouseY;
   lastMouseX = e.clientX;
   lastMouseY = e.clientY;
 });
 
-canvas.addEventListener('wheel', (e) => {
+canvas.addEventListener('wheel', function(e) {
   e.preventDefault();
-  const factor = e.deltaY > 0 ? 0.9 : 1.1;
+  var factor = e.deltaY > 0 ? 0.9 : 1.1;
   resolutionScale = Math.max(0.25, Math.min(1.0, resolutionScale * factor));
   if (engine) {
-    const w = Math.max(1, Math.floor(CANVAS_W * resolutionScale));
-    const h = Math.max(1, Math.floor(CANVAS_H * resolutionScale));
+    var w = Math.max(1, Math.floor(CANVAS_W * resolutionScale));
+    var h = Math.max(1, Math.floor(CANVAS_H * resolutionScale));
     engine.resize(w, h);
   }
 });

@@ -367,6 +367,41 @@ impl RasterEngine {
         let end = js_sys::Date::now();
         end - start
     }
+
+    pub fn benchmark_polygons(&mut self, count: u32, sides: u32, radius: f32) -> f64 {
+        let w = self.main_fb.width as f32;
+        let h = self.main_fb.height as f32;
+        let color = Color::new(0.0, 0.5, 1.0, 0.7);
+
+        let start = js_sys::Date::now();
+        for i in 0..count {
+            let cx = (i as f32 * 73.0) % w;
+            let cy = (i as f32 * 47.0) % h;
+            let mut points: Vec<(f32, f32)> = Vec::with_capacity(sides as usize);
+            for s in 0..sides {
+                let angle = (s as f32 / sides as f32) * std::f32::consts::TAU + (i as f32 * 0.013);
+                let px = cx + angle.cos() * radius;
+                let py = cy + angle.sin() * radius;
+                points.push((px, py));
+            }
+            rasterize_polygon_scanline(&mut self.main_fb, &points, color, self.blend_mode);
+        }
+        let end = js_sys::Date::now();
+        end - start
+    }
+
+    pub fn malloc(&self, size: usize) -> *mut u8 {
+        let mut vec: Vec<u8> = Vec::with_capacity(size);
+        let ptr = vec.as_mut_ptr();
+        std::mem::forget(vec);
+        ptr
+    }
+
+    pub fn free(&self, ptr: *mut u8, size: usize) {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, size, size);
+        }
+    }
 }
 
 impl RasterEngine {

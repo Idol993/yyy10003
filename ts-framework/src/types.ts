@@ -104,10 +104,15 @@ export interface BenchmarkResult {
   primitiveType: string;
 }
 
+export interface WasmBindgenModule {
+  default: () => Promise<void> | void;
+  RasterEngine: new (width: number, height: number) => WasmRasterEngine;
+  memory?: WebAssembly.Memory;
+  wasm_memory?: WebAssembly.Memory;
+}
+
 export interface WasmExports {
   RasterEngine: new (width: number, height: number) => WasmRasterEngine;
-  __wbindgen_malloc: (size: number) => number;
-  __wbindgen_free: (ptr: number, size: number) => void;
   memory: WebAssembly.Memory;
 }
 
@@ -159,7 +164,9 @@ export interface WasmRasterEngine {
   get_layer_len(id: number): number;
   benchmark_triangles(count: number, size: number): number;
   benchmark_circles(count: number, radius: number): number;
-  free(): void;
+  benchmark_polygons(count: number, sides: number, radius: number): number;
+  malloc(size: number): number;
+  free(ptr: number, size: number): void;
 }
 
 export type Mat4 = Float64Array;

@@ -1,6 +1,6 @@
 import { WasmRasterEngine, BlendMode, TriangleVertex, RenderContext } from './types';
 import { MatrixStack } from './matrix';
-import { writeFloatArrayToWasm, freeWasmBytes, getWasm } from './wasm-bridge';
+import { writeFloatArrayToWasm, freeWasmBytes } from './wasm-bridge';
 
 export class Primitives {
   private engine: WasmRasterEngine;
@@ -74,9 +74,9 @@ export class Primitives {
       flat[i * 2] = transformed[i].x;
       flat[i * 2 + 1] = transformed[i].y;
     }
-    const { ptr, len } = writeFloatArrayToWasm(flat);
+    const { ptr, len } = writeFloatArrayToWasm(this.engine, flat);
     this.engine.draw_polygon(ptr, len, r, g, b, a, msaa);
-    freeWasmBytes(ptr, len);
+    freeWasmBytes(this.engine, ptr, flat.byteLength);
   }
 
   fillTriangle(

@@ -17,9 +17,9 @@ export class FontLoader {
   }
 
   loadFromData(data: Uint8Array, size: number = 16): number {
-    const { ptr, len } = writeBytesToWasm(data);
+    const { ptr, len } = writeBytesToWasm(this.engine, data);
     const fontId = this.engine.load_font(ptr, len);
-    freeWasmBytes(ptr, len);
+    freeWasmBytes(this.engine, ptr, len);
 
     if (fontId > 0) {
       this.engine.set_font_size(fontId, size);

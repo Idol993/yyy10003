@@ -1,5 +1,4 @@
 import { WasmRasterEngine, BlendMode, LayerInfo } from './types';
-import { getWasm } from './wasm-bridge';
 
 export class LayerManager {
   private engine: WasmRasterEngine;
